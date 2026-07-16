@@ -83,6 +83,12 @@ export default function Home() {
               How It Works
             </a>
             <a
+              href="#pricing"
+              className="hidden text-sm font-medium text-zinc-400 transition-colors hover:text-white sm:block"
+            >
+              Pricing
+            </a>
+            <a
               href="#"
               className="rounded-full bg-gradient-to-r from-[#F7CB1C] to-[#FFAE00] px-4 py-2 text-sm font-semibold text-black transition-all hover:from-[#FFAE00] hover:to-[#F7CB1C]"
             >
