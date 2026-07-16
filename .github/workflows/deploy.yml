@@ -15,9 +15,26 @@ jobs:
           username: azureuser
           key: ${{ secrets.AZURE_SSH_KEY }}
           script: |
+            set -e
+
+            # API
             cd ~/extractor-api
             git pull origin main
             npm ci
             pm2 restart extractor-api
+
+            # Admin panel - must rebuild on every deploy
+            cd ~/extractor-api/admin
+            npm ci
+            npm run build
+            pm2 restart vidplus-admin
+
+            # Landing page - must rebuild on every deploy
+            cd ~/extractor-api/landing
+            npm ci
+            npm run build
+            pm2 restart vidplus-landing
+
+            pm2 save
             pm2 status
-            echo "Deploy complete"
+            echo "All three apps deployed successfully"
