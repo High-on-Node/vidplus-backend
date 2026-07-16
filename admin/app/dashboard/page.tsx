@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import Link from "next/link";
 
 const navigation = [
@@ -33,7 +33,7 @@ function StatusDot({ healthy }: { healthy: boolean }) {
 }
 
 function Icon({ name }: { name: string }) {
-  const icons: Record<string, JSX.Element> = {
+  const icons: Record<string, React.JSX.Element> = {
     download: (
       <svg
         className="h-6 w-6"
