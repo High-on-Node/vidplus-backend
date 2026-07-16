@@ -4,3 +4,7 @@ downloads/
 *.log
 cookies.txt
 .DS_Store
+admin/.next/
+admin/node_modules/
+landing/.next/
+landing/node_modules/
