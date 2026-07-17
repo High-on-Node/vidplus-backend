@@ -47,6 +47,31 @@ const IOS_SAFE_FORMAT = [
   'b',
 ].join('/');
 
+const INSTAGRAM_FORMAT = [
+  'b[vcodec!*=?vp09][vcodec!*=?av01]',
+  'bv*[vcodec!*=?vp09][vcodec!*=?av01]+ba',
+  'b',
+].join('/');
+
+const FACEBOOK_FORMAT = [
+  'b[vcodec!*=?vp09][vcodec!*=?av01]',
+  'bv*[vcodec!*=?vp09][vcodec!*=?av01]+ba',
+  'b',
+].join('/');
+
+const REDDIT_FORMAT = IOS_SAFE_FORMAT;
+
+function getFormatForUrl(url) {
+  if (url.includes('instagram.com') || url.includes('instagr.am')) {
+    return INSTAGRAM_FORMAT;
+  }
+  if (url.includes('facebook.com') || url.includes('fb.com') ||
+      url.includes('fb.watch')) {
+    return FACEBOOK_FORMAT;
+  }
+  return IOS_SAFE_FORMAT;
+}
+
 // Mirrors the codecs the chain above treats as iOS-playable. Audio matters too:
 // the chain can pair H.264 with any audio, and Opus inside MP4 is as unplayable
 // on iOS as VP9 is. A source that does not declare acodec is not held against it.
@@ -190,22 +215,25 @@ app.post('/info', requireApiKey, async (req, res) => {
     return res.status(400).json({ error: 'body must include a string "url"' });
   }
 
+  // -J dumps a single JSON object for the URL. execFile => no shell, url is
+  // passed as a discrete argv entry (never interpolated into a shell).
+  //
+  // -f runs the SAME selector /download uses, so yt-dlp resolves the exact
+  // format this URL will actually yield. Without it, /info could advertise a
+  // quality (or a codec) that /download would never return.
+  //
+  // Declared outside the try so the catch block can log the args used.
+  const isVimeo = url.includes('vimeo.com');
+  const args = [
+    ...baseArgs(),
+    '-J',
+    '-f', getFormatForUrl(url),
+    '--no-playlist',
+    ...(isVimeo ? ['--impersonate', 'chrome'] : []),
+    url,
+  ];
+
   try {
-    // -J dumps a single JSON object for the URL. execFile => no shell, url is
-    // passed as a discrete argv entry (never interpolated into a shell).
-    //
-    // -f runs the SAME selector /download uses, so yt-dlp resolves the exact
-    // format this URL will actually yield. Without it, /info could advertise a
-    // quality (or a codec) that /download would never return.
-    const isVimeo = url.includes('vimeo.com');
-    const args = [
-      ...baseArgs(),
-      '-J',
-      '-f', IOS_SAFE_FORMAT,
-      '--no-playlist',
-      ...(isVimeo ? ['--impersonate', 'chrome'] : []),
-      url,
-    ];
     const { stdout } = await execFileAsync(YTDLP_BIN, args, {
       maxBuffer: EXEC_MAX_BUFFER,
       timeout: 90 * 1000,
@@ -224,10 +252,17 @@ app.post('/info', requireApiKey, async (req, res) => {
     });
 
     if (!hasIOSCompatible && allFormats.length > 0) {
-      return res.status(422).json({
-        error: 'This video cannot be played on iPhone',
-        detail: 'Source only offers VP9 or AV1 which iOS does not support'
-      });
+      const isInstagram = url.includes('instagram.com') ||
+                          url.includes('instagr.am');
+      const isFacebook = url.includes('facebook.com') ||
+                         url.includes('fb.com') ||
+                         url.includes('fb.watch');
+      if (!isInstagram && !isFacebook) {
+        return res.status(422).json({
+          error: 'This video cannot be played on iPhone',
+          detail: 'Source only offers VP9 or AV1 which iOS does not support'
+        });
+      }
     }
 
     const formats = Array.isArray(data.formats)
@@ -289,7 +324,7 @@ app.post('/download', requireApiKey, async (req, res) => {
   // the merged audio, since Opus in an MP4 container is also unplayable on iOS.
   const format = formatId
     ? `${formatId}+ba[acodec^=mp4a]/${formatId}+ba/${formatId}/b`
-    : IOS_SAFE_FORMAT;
+    : getFormatForUrl(url);
 
   const isVimeo = url.includes('vimeo.com');
   const args = [
