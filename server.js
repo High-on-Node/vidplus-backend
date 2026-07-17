@@ -213,6 +213,23 @@ app.post('/info', requireApiKey, async (req, res) => {
 
     const data = JSON.parse(stdout);
 
+    // iOS compatibility check
+    const allFormats = Array.isArray(data.formats) ? data.formats : [];
+    const hasIOSCompatible = allFormats.some(f => {
+      const vcodec = String(f.vcodec || '');
+      return vcodec.startsWith('avc1') ||
+             vcodec.startsWith('h264') ||
+             vcodec.startsWith('hvc1') ||
+             vcodec.includes('hevc');
+    });
+
+    if (!hasIOSCompatible && allFormats.length > 0) {
+      return res.status(422).json({
+        error: 'This video cannot be played on iPhone',
+        detail: 'Source only offers VP9 or AV1 which iOS does not support'
+      });
+    }
+
     const formats = Array.isArray(data.formats)
       ? data.formats.map((f) => ({
           format_id: f.format_id,
