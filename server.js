@@ -32,9 +32,9 @@ const YTDLP_BIN = '/usr/local/bin/yt-dlp';
 // literal. The chain degrades instead of failing: a source with nothing
 // iOS-playable still returns a file. Callers can detect that case via the
 // `selected.ios_playable` flag on /info.
-const RE_H264 = "^(avc1|h264)";
-const RE_HEVC = "^(hvc1|hev1|h265|hevc)";
-const RE_AAC = "^(mp4a|aac)";
+const RE_H264 = "avc1*";
+const RE_HEVC = "hvc1*";
+const RE_AAC = "mp4a*";
 
 const IOS_SAFE_FORMAT = [
   `bv*[vcodec~='${RE_H264}']+ba[acodec~='${RE_AAC}']`, // H.264 + AAC
