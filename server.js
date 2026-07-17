@@ -76,7 +76,7 @@ fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 function baseArgs() {
   const args = [
     '--no-warnings',
-    '--extractor-args', 'youtube:player_client=ios,web',
+    '--extractor-args', 'youtube:player_client=ios',
   ];
   if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
     args.push('--cookies', COOKIES_FILE);
@@ -260,6 +260,8 @@ app.post('/info', requireApiKey, async (req, res) => {
       formats,
     });
   } catch (err) {
+    console.error('[info] yt-dlp error for URL:', url);
+    console.error('[info] args used:', args.join(' '));
     res.status(500).json({
       error: 'failed to extract info',
       detail: trimErr(err),
