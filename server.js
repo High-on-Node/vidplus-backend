@@ -74,11 +74,31 @@ fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 // Build the common args. Cookies are appended only if the file is configured
 // AND actually exists on disk (we wire support now, file added later).
 function baseArgs() {
-  const args = ['--no-warnings'];
+  const args = [
+    '--no-warnings',
+    '--extractor-args', 'youtube:player_client=ios,web',
+  ];
   if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
     args.push('--cookies', COOKIES_FILE);
   }
   return args;
+}
+
+function normalizeUrl(url) {
+  // Reddit short share links /s/<id> fail with 403.
+  // Strip query params and return as-is for now.
+  // yt-dlp handles canonical reddit URLs fine.
+  try {
+    const u = new URL(url);
+    // If it is a reddit short link, warn but pass through
+    // yt-dlp will attempt extraction
+    if (u.hostname.includes('reddit.com') && u.pathname.includes('/s/')) {
+      console.warn('[warn] Reddit short URL detected, may fail:', url);
+    }
+    return url;
+  } catch {
+    return url;
+  }
 }
 
 async function ytdlpVersion() {
@@ -165,7 +185,7 @@ app.get('/health', async (_req, res) => {
 
 // --- POST /info ------------------------------------------------------------
 app.post('/info', requireApiKey, async (req, res) => {
-  const url = req.body?.url;
+  const url = normalizeUrl(req.body?.url);
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'body must include a string "url"' });
   }
@@ -177,7 +197,15 @@ app.post('/info', requireApiKey, async (req, res) => {
     // -f runs the SAME selector /download uses, so yt-dlp resolves the exact
     // format this URL will actually yield. Without it, /info could advertise a
     // quality (or a codec) that /download would never return.
-    const args = [...baseArgs(), '-J', '-f', IOS_SAFE_FORMAT, '--no-playlist', url];
+    const isVimeo = url.includes('vimeo.com');
+    const args = [
+      ...baseArgs(),
+      '-J',
+      '-f', IOS_SAFE_FORMAT,
+      '--no-playlist',
+      ...(isVimeo ? ['--impersonate', 'chrome'] : []),
+      url,
+    ];
     const { stdout } = await execFileAsync(YTDLP_BIN, args, {
       maxBuffer: EXEC_MAX_BUFFER,
       timeout: 90 * 1000,
@@ -224,7 +252,7 @@ app.post('/info', requireApiKey, async (req, res) => {
 
 // --- POST /download --------------------------------------------------------
 app.post('/download', requireApiKey, async (req, res) => {
-  const url = req.body?.url;
+  const url = normalizeUrl(req.body?.url);
   const formatId = req.body?.format_id;
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'body must include a string "url"' });
@@ -244,11 +272,13 @@ app.post('/download', requireApiKey, async (req, res) => {
     ? `${formatId}+ba[acodec^=mp4a]/${formatId}+ba/${formatId}/b`
     : IOS_SAFE_FORMAT;
 
+  const isVimeo = url.includes('vimeo.com');
   const args = [
     ...baseArgs(),
     '-f', format,
     '--merge-output-format', 'mp4',
     '--no-playlist',
+    ...(isVimeo ? ['--impersonate', 'chrome'] : []),
     '-o', outTemplate,
     url,
   ];
