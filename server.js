@@ -103,6 +103,9 @@ function baseArgs() {
     '--no-warnings',
     '--extractor-args', 'youtube:player_client=ios',
     '--extractor-args', 'youtubepot-bgutilscript:script_path=/home/azureuser/bgutil-ytdlp-pot-provider/server/build/generate_once.js',
+    '--no-js-runtimes',
+    '--js-runtimes', 'node',
+    '--js-runtimes', 'deno:/nonexistent',
   ];
   if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
     args.push('--cookies', COOKIES_FILE);
