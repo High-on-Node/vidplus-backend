@@ -82,6 +82,17 @@ const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 const DOWNLOAD_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const CLEANUP_INTERVAL_MS = 2 * 60 * 1000; // sweep every 2 minutes
 
+// TikTok's thumbnail CDN (p16-*-sign.tiktokcdn.com) is signed/region-pinned and
+// unreachable from client devices, though reachable from this server. For TikTok
+// ONLY we fetch the thumbnail here and re-serve it from /thumbnails so the app
+// loads it from our own origin. Cached files are swept on the same TTL model as
+// downloads. PUBLIC_BASE_URL is the origin the app can actually reach us at.
+const THUMBNAIL_DIR = path.join(__dirname, 'thumbnails');
+const THUMBNAIL_TTL_MS = 60 * 60 * 1000; // 1 hour (browse lists re-view thumbs)
+const THUMBNAIL_FETCH_TIMEOUT_MS = 10 * 1000; // give up on a stubborn CDN
+const PUBLIC_BASE_URL =
+  (process.env.PUBLIC_BASE_URL || 'https://api.vidplus.io').replace(/\/+$/, '');
+
 // Generous buffer: -J metadata for long playlists/videos can be large.
 const EXEC_MAX_BUFFER = 64 * 1024 * 1024;
 
@@ -91,6 +102,7 @@ if (!API_KEY) {
 }
 
 fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+fs.mkdirSync(THUMBNAIL_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // yt-dlp helpers
@@ -222,6 +234,68 @@ function summarizeSelection(data) {
   };
 }
 
+// Map an image Content-Type to a file extension so express.static re-serves it
+// with the right type. Defaults to jpg.
+function extFromContentType(ct) {
+  const t = String(ct || '').toLowerCase();
+  if (t.includes('webp')) return 'webp';
+  if (t.includes('png')) return 'png';
+  if (t.includes('heic') || t.includes('heif')) return 'heic';
+  if (t.includes('gif')) return 'gif';
+  return 'jpg';
+}
+
+// Fetch a TikTok thumbnail server-side (the CDN is unreachable from clients) and
+// cache it under THUMBNAIL_DIR keyed by video id, returning a URL on OUR origin.
+// Reuses a still-fresh cached file instead of re-fetching. On ANY failure
+// (timeout, non-200, write error, or fetch unavailable) returns null so /info
+// degrades to a null thumbnail rather than failing outright.
+async function cacheTiktokThumbnail(id, thumbnailUrl) {
+  if (!thumbnailUrl) return null;
+  const safeId =
+    String(id).replace(/[^A-Za-z0-9_-]/g, '') || crypto.randomBytes(6).toString('hex');
+
+  // Cache hit: reuse a fresh file for this id (mirrors /download's lookup).
+  try {
+    const existing = (await fsp.readdir(THUMBNAIL_DIR)).find((n) =>
+      n.startsWith(`${safeId}.`),
+    );
+    if (existing) {
+      const stat = await fsp.stat(path.join(THUMBNAIL_DIR, existing));
+      if (Date.now() - stat.mtimeMs < THUMBNAIL_TTL_MS) {
+        return `${PUBLIC_BASE_URL}/thumbnails/${existing}`;
+      }
+    }
+  } catch {
+    // no cached entry yet / stat race — fall through and fetch
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), THUMBNAIL_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(thumbnailUrl, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ' +
+          'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+        Referer: 'https://www.tiktok.com/',
+      },
+    });
+    if (!resp.ok) throw new Error(`thumbnail HTTP ${resp.status}`);
+    const ext = extFromContentType(resp.headers.get('content-type'));
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const filename = `${safeId}.${ext}`;
+    await fsp.writeFile(path.join(THUMBNAIL_DIR, filename), buf);
+    return `${PUBLIC_BASE_URL}/thumbnails/${filename}`;
+  } catch (err) {
+    console.warn('[info] tiktok thumbnail fetch failed, using null:', err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Express app
 // ---------------------------------------------------------------------------
@@ -320,10 +394,20 @@ app.post('/info', requireApiKey, async (req, res) => {
         }))
       : [];
 
+    // TikTok thumbnails come from a signed CDN the app can't reach; re-host them
+    // on our origin. All other platforms pass through unchanged.
+    const isTikTok = url.includes('tiktok.com');
+    const thumbnail = isTikTok
+      ? await cacheTiktokThumbnail(
+          data.id ?? crypto.randomBytes(6).toString('hex'),
+          data.thumbnail,
+        )
+      : (data.thumbnail ?? null);
+
     res.json({
       platform: data.extractor_key || data.extractor || null,
       title: data.title ?? null,
-      thumbnail: data.thumbnail ?? null,
+      thumbnail,
       duration: data.duration ?? null,
       webpage_url: data.webpage_url ?? url,
       format_count: formats.length,
@@ -404,21 +488,26 @@ app.post('/download', requireApiKey, async (req, res) => {
   }
 });
 
+// --- GET /thumbnails/* (no auth) -------------------------------------------
+// Re-hosted TikTok thumbnails. Public so the app's <img> loader (which can't
+// send x-api-key) can fetch them. Files are swept on THUMBNAIL_TTL_MS.
+app.use('/thumbnails', express.static(THUMBNAIL_DIR));
+
 // 404 fallback
 app.use((_req, res) => res.status(404).json({ error: 'not found' }));
 
 // ---------------------------------------------------------------------------
-// Download cleanup sweep (10-minute TTL)
+// Cleanup sweep — downloads (10m) and re-hosted thumbnails (their own TTL)
 // ---------------------------------------------------------------------------
-async function sweepDownloads() {
+async function sweepDir(dir, ttlMs) {
   try {
     const now = Date.now();
-    const entries = await fsp.readdir(DOWNLOAD_DIR);
+    const entries = await fsp.readdir(dir);
     for (const name of entries) {
-      const full = path.join(DOWNLOAD_DIR, name);
+      const full = path.join(dir, name);
       try {
         const stat = await fsp.stat(full);
-        if (now - stat.mtimeMs > DOWNLOAD_TTL_MS) {
+        if (now - stat.mtimeMs > ttlMs) {
           await fsp.rm(full, { force: true, recursive: true });
         }
       } catch {
@@ -428,6 +517,11 @@ async function sweepDownloads() {
   } catch (err) {
     console.error('cleanup sweep error:', err.message);
   }
+}
+
+async function sweepDownloads() {
+  await sweepDir(DOWNLOAD_DIR, DOWNLOAD_TTL_MS);
+  await sweepDir(THUMBNAIL_DIR, THUMBNAIL_TTL_MS);
 }
 setInterval(sweepDownloads, CLEANUP_INTERVAL_MS).unref();
 
