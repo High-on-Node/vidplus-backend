@@ -136,6 +136,25 @@ async function ytdlpVersion() {
   return stdout.trim();
 }
 
+// Adaptive sources (HLS/DASH — what most social platforms serve) publish no
+// byte count anywhere: neither the root object nor the individual format
+// entries carry `filesize` or `filesize_approx`, which is why /info reported
+// size as Unknown for them. They do publish `tbr` (total bitrate, kbps), and
+// duration is always a video-level field, so tbr x duration is the same
+// approximation yt-dlp itself uses to fill filesize_approx elsewhere.
+// Returns null unless BOTH inputs exist — never guess from one.
+function estimateSize(tbr, duration) {
+  if (!tbr || !duration) return null;
+  return Math.round((tbr * 1000 / 8) * duration);
+}
+
+// Byte count for one format entry, best source first: an exact filesize, then
+// yt-dlp's own approximation, then a bitrate estimate. `duration` has to be
+// passed in from the root because format entries never carry one of their own.
+function formatSize(f, duration) {
+  return f.filesize ?? f.filesize_approx ?? estimateSize(f.tbr, duration);
+}
+
 // Describe the format the selector actually resolved to, so /info promises what
 // /download delivers. When yt-dlp merges two streams the pair is in
 // `requested_formats`; when a single combined stream is chosen there is no such
@@ -147,13 +166,27 @@ function summarizeSelection(data) {
   const vcodec = data.vcodec && data.vcodec !== 'none' ? data.vcodec : null;
   const acodec = data.acodec && data.acodec !== 'none' ? data.acodec : null;
 
+  // Duration is only ever reported at the root; format entries have no such
+  // field, so there is nothing to fall back to when the root omits it.
+  const duration = data.duration ?? null;
+
+  // A merged selection costs the sum of its parts; a single combined stream is
+  // its own size. Either way an unknown part makes the total unknown rather
+  // than an undercount, so the null propagates instead of being skipped.
   const parts = Array.isArray(data.requested_formats) ? data.requested_formats : [];
-  const filesize = parts.length
-    ? parts.reduce((sum, f) => {
-        const n = f.filesize ?? f.filesize_approx ?? null;
-        return sum === null || n === null ? null : sum + n;
-      }, 0)
-    : (data.filesize ?? data.filesize_approx ?? null);
+  let filesize = 0;
+  let estimated = false;
+  for (const f of parts.length ? parts : [data]) {
+    const exact = f.filesize ?? f.filesize_approx ?? null;
+    const n = exact ?? estimateSize(f.tbr, duration);
+    if (n === null) {
+      filesize = null;
+      estimated = false;
+      break;
+    }
+    if (exact === null) estimated = true;
+    filesize += n;
+  }
 
   return {
     format_id: data.format_id ?? null,
@@ -166,6 +199,9 @@ function summarizeSelection(data) {
     vcodec,
     acodec,
     filesize,
+    // true => `filesize` came from bitrate x duration, not a reported byte
+    // count, so callers can show it as approximate ("~41 MB").
+    filesize_estimated: estimated,
     // false => /download can only return something iOS refuses: VP9/AV1 video,
     // or Opus audio in an MP4. Neither saves to Photos nor plays.
     ios_playable:
@@ -278,7 +314,7 @@ app.post('/info', requireApiKey, async (req, res) => {
           fps: f.fps ?? null,
           vcodec: f.vcodec ?? null,
           acodec: f.acodec ?? null,
-          filesize: f.filesize ?? f.filesize_approx ?? null,
+          filesize: formatSize(f, data.duration ?? null),
           tbr: f.tbr ?? null,
           format_note: f.format_note ?? null,
         }))
